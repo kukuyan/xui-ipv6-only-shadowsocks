@@ -16,7 +16,7 @@
 ## 一键部署
 
 ```bash
-git clone <GITHUB_REPO_URL>
+git clone https://github.com/kukuyan/xui-ipv6-only-shadowsocks.git
 cd xui-ipv6-only-shadowsocks
 sudo bash scripts/deploy-ipv6-ss-xui.sh
 ```
