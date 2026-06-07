@@ -1,0 +1,13 @@
+.DS_Store
+*.tmp
+*.bak
+*.log
+__pycache__/
+.pytest_cache/
+
+# Never commit generated secrets or x-ui database snapshots.
+ss-ipv6-only-profile.txt
+ss-ipv6-only-uri.txt
+ss-ipv6-only-clash.yaml
+ss-ipv6-only-provider.yaml
+x-ui.db*
