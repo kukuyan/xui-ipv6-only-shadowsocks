@@ -31,6 +31,14 @@ sudo SS_PORT=39443 SS_METHOD=chacha20-ietf-poly1305 bash scripts/deploy-ipv6-ss-
 
 部署成功后，终端只会显示入站名称、IPv6 地址、端口、配置文件路径和数据库备份路径，不会输出 Shadowsocks 密码、`ss://` 链接或订阅链接。
 
+部署脚本会兼容不同 x-ui / 3x-ui CLI：优先尝试单独重启 Xray 的命令，如果命令不可用或没有重新生成 `/usr/local/x-ui/bin/config.json`，会回退到 `x-ui restart`，再回退到 `systemctl restart x-ui`。
+
+如果上次部署失败留下了半部署状态，例如数据库里已有 `ss-ipv6-only`，但 `39443` 没有监听，脚本会直接退出并提示先回滚。确认只清理本脚本创建的入站和防火墙规则时，可以执行：
+
+```bash
+sudo bash scripts/deploy-ipv6-ss-xui.sh --force-cleanup
+```
+
 ## 生成的文件
 
 部署脚本会生成以下 root-only 文件，权限为 `600`：
@@ -100,6 +108,7 @@ nc -4 -vz <ipv4> 39443
 ```bash
 sudo systemctl is-active x-ui
 sudo systemctl is-active ss-ipv6-only-firewall.service
+sudo grep -n "ss-ipv6-only\|39443" /usr/local/x-ui/bin/config.json
 ```
 
 ## 回滚
@@ -149,3 +158,4 @@ sudo SS_PORT=40443 bash scripts/deploy-ipv6-ss-xui.sh
 - 脚本不会在日志、README 示例或终端输出中回显真实密码、`ss://` 链接或订阅链接。
 - 防火墙只添加带 `ss-ipv6-only` comment 的 IPv4 DROP 规则，不清空、不重置现有 iptables/nftables 规则。
 - 回滚只删除本脚本创建的端口规则，不删除用户数据和未确认的配置文件。
+- 如果部署验证失败，部署脚本会自动恢复本次运行前备份的 `/etc/x-ui/x-ui.db`，停用并删除 `ss-ipv6-only-firewall.service`，并删除本脚本创建的 IPv4 DROP 规则。失败时会打印 x-ui 重启命令的尝试输出，方便定位不同版本 x-ui / 3x-ui 的 CLI 行为。
