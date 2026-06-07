@@ -1,0 +1,14 @@
+[Unit]
+Description=IPv4 fallback DROP rules for ss-ipv6-only x-ui inbound
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/ss-ipv6-only-firewall
+ExecStart=/usr/local/sbin/ss-ipv6-only-firewall apply
+ExecStop=/usr/local/sbin/ss-ipv6-only-firewall remove
+
+[Install]
+WantedBy=multi-user.target
