@@ -7,6 +7,8 @@ SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 FIREWALL_SCRIPT="/usr/local/sbin/ss-ipv6-only-firewall"
 FIREWALL_ENV="/etc/default/ss-ipv6-only-firewall"
 SS_PORT="${SS_PORT:-39443}"
+RESTART_OUTPUT_FILE=""
+RESTART_COMMAND=""
 
 fatal() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -15,6 +17,27 @@ fatal() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fatal "missing required command: $1"
+}
+
+print_restart_output() {
+  if [[ -n "$RESTART_OUTPUT_FILE" && -s "$RESTART_OUTPUT_FILE" ]]; then
+    printf 'Restart command attempts/output:\n' >&2
+    cat "$RESTART_OUTPUT_FILE" >&2
+  elif [[ -n "$RESTART_COMMAND" ]]; then
+    printf 'Restart command used: %s\n' "$RESTART_COMMAND" >&2
+  fi
+}
+
+run_restart_candidate() {
+  local label="$1"
+  shift
+  printf '$ %s\n' "$label" >>"$RESTART_OUTPUT_FILE"
+  if "$@" >>"$RESTART_OUTPUT_FILE" 2>&1; then
+    RESTART_COMMAND="$label"
+    return 0
+  fi
+  printf 'exit status: %s\n' "$?" >>"$RESTART_OUTPUT_FILE"
+  return 1
 }
 
 load_firewall_env() {
@@ -77,11 +100,24 @@ restore_database() {
 }
 
 restart_xray() {
+  RESTART_OUTPUT_FILE="$(mktemp)"
+  : >"$RESTART_OUTPUT_FILE"
   if command -v x-ui >/dev/null 2>&1; then
-    x-ui restart-xray >/dev/null
-  else
-    systemctl restart x-ui
+    if run_restart_candidate "x-ui restart-xray" x-ui restart-xray; then
+      return 0
+    fi
+    if run_restart_candidate "x-ui restart xray" x-ui restart xray; then
+      return 0
+    fi
+    if run_restart_candidate "x-ui restart" x-ui restart; then
+      return 0
+    fi
   fi
+  if run_restart_candidate "systemctl restart x-ui" systemctl restart x-ui; then
+    return 0
+  fi
+  print_restart_output
+  return 1
 }
 
 print_summary() {
@@ -103,6 +139,6 @@ validate_port
 [[ -d /etc/x-ui ]] || fatal "missing /etc/x-ui"
 disable_firewall_service
 restore_database
-restart_xray
+restart_xray || fatal "failed to restart x-ui after rollback"
 systemctl is-active --quiet x-ui || fatal "x-ui service is not active after rollback"
 print_summary
