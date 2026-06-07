@@ -28,15 +28,83 @@ print_restart_output() {
   fi
 }
 
+redact_sensitive() {
+  sed -E \
+    -e 's/("password"[[:space:]]*:[[:space:]]*")[^"]+/\1<redacted>/g' \
+    -e 's#(ss://)[^[:space:]]+#\1<redacted>#g'
+}
+
+candidate_output_is_help() {
+  local output_file="$1"
+  grep -Eqi '管理脚本使用方法|Usage:|Available commands|功能更多' "$output_file"
+}
+
+config_contains_inbound() {
+  [[ -f /usr/local/x-ui/bin/config.json ]] || return 1
+  CONFIG_PATH="/usr/local/x-ui/bin/config.json" \
+    SS_PORT="$SS_PORT" \
+    python3 - <<'PY'
+import json
+import os
+
+config_path = os.environ["CONFIG_PATH"]
+port = int(os.environ["SS_PORT"])
+tag = f"inbound-{port}"
+
+try:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+
+for inbound in config.get("inbounds", []):
+    if not isinstance(inbound, dict):
+        continue
+    if inbound.get("protocol") != "shadowsocks":
+        continue
+    if int(inbound.get("port", -1)) != port:
+        continue
+    if inbound.get("tag") == tag or inbound.get("remark") == "ss-ipv6-only":
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+wait_for_config_absent() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    ! config_contains_inbound && return 0
+    sleep 1
+  done
+  return 1
+}
+
 run_restart_candidate() {
   local label="$1"
+  local candidate_output status
   shift
   printf '$ %s\n' "$label" >>"$RESTART_OUTPUT_FILE"
-  if "$@" >>"$RESTART_OUTPUT_FILE" 2>&1; then
+  candidate_output="$(mktemp)"
+  if "$@" >"$candidate_output" 2>&1; then
+    redact_sensitive <"$candidate_output" >>"$RESTART_OUTPUT_FILE"
+    if candidate_output_is_help "$candidate_output"; then
+      printf 'command printed CLI help instead of performing a restart; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+      rm -f "$candidate_output"
+      return 1
+    fi
+    rm -f "$candidate_output"
+    if ! wait_for_config_absent; then
+      printf 'command exited successfully, but config.json still contains ss-ipv6-only; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+      return 1
+    fi
     RESTART_COMMAND="$label"
     return 0
   fi
-  printf 'exit status: %s\n' "$?" >>"$RESTART_OUTPUT_FILE"
+  status="$?"
+  redact_sensitive <"$candidate_output" >>"$RESTART_OUTPUT_FILE"
+  rm -f "$candidate_output"
+  printf 'exit status: %s\n' "$status" >>"$RESTART_OUTPUT_FILE"
   return 1
 }
 
@@ -134,6 +202,7 @@ print_summary() {
 [[ "$(uname -s)" == "Linux" ]] || fatal "this script only supports Linux"
 require_command systemctl
 require_command iptables
+require_command python3
 load_firewall_env
 validate_port
 [[ -d /etc/x-ui ]] || fatal "missing /etc/x-ui"

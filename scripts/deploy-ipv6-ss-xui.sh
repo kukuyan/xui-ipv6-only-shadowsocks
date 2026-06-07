@@ -197,39 +197,147 @@ print_restart_output() {
   fi
 }
 
+redact_sensitive() {
+  sed -E \
+    -e 's/("password"[[:space:]]*:[[:space:]]*")[^"]+/\1<redacted>/g' \
+    -e 's#(ss://)[^[:space:]]+#\1<redacted>#g'
+}
+
+candidate_output_is_help() {
+  local output_file="$1"
+  grep -Eqi '管理脚本使用方法|Usage:|Available commands|功能更多' "$output_file"
+}
+
+find_xray_binary() {
+  local path
+  for path in /usr/local/x-ui/bin/xray /usr/local/x-ui/bin/xray-linux-* /usr/local/bin/xray /usr/bin/xray; do
+    if [[ -x "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_failure_diagnostics() {
+  local xray_binary=""
+  printf 'Current listener rows for port %s:\n' "$SS_PORT" >&2
+  ss -H -lntup 2>/dev/null | awk -v port="$SS_PORT" '
+    {
+      local_addr = $5
+      n = split(local_addr, parts, ":")
+      if (parts[n] == port) {
+        print
+        found = 1
+      }
+    }
+    END {
+      if (!found) {
+        print "(none)"
+      }
+    }
+  ' >&2 || true
+
+  if xray_binary="$(find_xray_binary)"; then
+    printf 'Xray config test output:\n' >&2
+    printf '$ %s run -test -config /usr/local/x-ui/bin/config.json\n' "$xray_binary" >&2
+    "$xray_binary" run -test -config /usr/local/x-ui/bin/config.json 2>&1 | redact_sensitive >&2 || true
+  else
+    printf 'Xray config test output: no xray binary found in common x-ui paths\n' >&2
+  fi
+}
+
+wait_for_restart_state() {
+  local expect_state="$1"
+  local attempt
+  case "$expect_state" in
+    none)
+      return 0
+      ;;
+    present)
+      for attempt in 1 2 3 4 5; do
+        config_contains_inbound && return 0
+        sleep 1
+      done
+      return 1
+      ;;
+    absent)
+      for attempt in 1 2 3 4 5; do
+        ! config_contains_inbound && return 0
+        sleep 1
+      done
+      return 1
+      ;;
+    listener)
+      for attempt in 1 2 3 4 5; do
+        if config_contains_inbound && has_ipv6_listener && ! has_ipv4_listener && ! has_wildcard_listener; then
+          return 0
+        fi
+        sleep 1
+      done
+      return 1
+      ;;
+    *)
+      fatal "internal error: unknown restart expectation: $expect_state"
+      ;;
+  esac
+}
+
 run_restart_candidate() {
   local label="$1"
-  local expect_config="${2:-none}"
+  local expect_state="${2:-none}"
+  local candidate_output status
   shift
   shift
   printf '$ %s\n' "$label" >>"$RESTART_OUTPUT_FILE"
-  if "$@" >>"$RESTART_OUTPUT_FILE" 2>&1; then
-    if [[ "$expect_config" == "present" ]] && ! config_contains_inbound; then
-      printf 'command exited successfully, but config.json does not contain ss-ipv6-only yet; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+  candidate_output="$(mktemp)"
+  if "$@" >"$candidate_output" 2>&1; then
+    redact_sensitive <"$candidate_output" >>"$RESTART_OUTPUT_FILE"
+    if candidate_output_is_help "$candidate_output"; then
+      printf 'command printed CLI help instead of performing a restart; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+      rm -f "$candidate_output"
+      return 1
+    fi
+    rm -f "$candidate_output"
+    if ! wait_for_restart_state "$expect_state"; then
+      case "$expect_state" in
+        present)
+          printf 'command exited successfully, but config.json does not contain ss-ipv6-only yet; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+          ;;
+        absent)
+          printf 'command exited successfully, but config.json still contains ss-ipv6-only; trying fallback\n' >>"$RESTART_OUTPUT_FILE"
+          ;;
+        listener)
+          printf 'command exited successfully, but port %s is not listening as IPv6-only yet; trying fallback\n' "$SS_PORT" >>"$RESTART_OUTPUT_FILE"
+          ;;
+      esac
       return 1
     fi
     RESTART_COMMAND="$label"
     return 0
   fi
-  printf 'exit status: %s\n' "$?" >>"$RESTART_OUTPUT_FILE"
+  status="$?"
+  redact_sensitive <"$candidate_output" >>"$RESTART_OUTPUT_FILE"
+  rm -f "$candidate_output"
+  printf 'exit status: %s\n' "$status" >>"$RESTART_OUTPUT_FILE"
   return 1
 }
 
 restart_xray() {
-  local expect_config="${1:-none}"
+  local expect_state="${1:-none}"
   RESTART_OUTPUT_FILE="$(mktemp)"
   : >"$RESTART_OUTPUT_FILE"
 
-  if run_restart_candidate "x-ui restart-xray" "$expect_config" x-ui restart-xray; then
+  if run_restart_candidate "x-ui restart-xray" "$expect_state" x-ui restart-xray; then
     return 0
   fi
-  if run_restart_candidate "x-ui restart xray" "$expect_config" x-ui restart xray; then
+  if run_restart_candidate "x-ui restart xray" "$expect_state" x-ui restart xray; then
     return 0
   fi
-  if run_restart_candidate "x-ui restart" "$expect_config" x-ui restart; then
+  if run_restart_candidate "x-ui restart" "$expect_state" x-ui restart; then
     return 0
   fi
-  if run_restart_candidate "systemctl restart x-ui" "$expect_config" systemctl restart x-ui; then
+  if run_restart_candidate "systemctl restart x-ui" "$expect_state" systemctl restart x-ui; then
     return 0
   fi
 
@@ -255,13 +363,14 @@ cleanup_failed_deploy() {
     printf 'Removed firewall service and ss-ipv6-only IPv4 DROP rules.\n' >&2
   fi
   if [[ "$DB_MODIFIED" -eq 1 ]]; then
-    restart_xray >/dev/null 2>&1 || true
+    restart_xray absent >/dev/null 2>&1 || true
   fi
 }
 
 fail_after_partial_deploy() {
   printf 'ERROR: %s\n' "$*" >&2
   print_restart_output
+  print_failure_diagnostics
   cleanup_failed_deploy
   exit 1
 }
@@ -351,7 +460,7 @@ handle_existing_inbound() {
   delete_existing_inbound
   DB_MODIFIED=1
   remove_firewall_service
-  restart_xray none || fatal "failed to restart x-ui after --force-cleanup"
+  restart_xray absent || fatal "failed to restart x-ui after --force-cleanup"
 }
 
 check_prerequisites() {
@@ -643,7 +752,7 @@ backup_database
 generate_password
 insert_inbound
 install_firewall_service
-restart_xray present || fail_after_partial_deploy "failed to restart x-ui/Xray or regenerate config.json"
+restart_xray listener || fail_after_partial_deploy "failed to restart x-ui/Xray or start IPv6-only listener"
 verify_deployment
 generate_import_files
 print_summary
