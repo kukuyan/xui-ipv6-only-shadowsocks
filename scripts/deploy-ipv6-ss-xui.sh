@@ -551,7 +551,7 @@ stream_settings = json.dumps(
 sniffing = json.dumps(
     {
         "enabled": False,
-        "destOverride": ["http", "tls", "quic", "fakedns"],
+        "destOverride": ["http", "tls"],
         "metadataOnly": False,
         "routeOnly": False,
     },
